@@ -1,0 +1,694 @@
+// ViaFinance Pessoal — schema do banco
+// Regra técnica obrigatória (item 5 da especificação):
+// O cadastro/modelo da despesa fixa fica em DespesaFixa.
+// Cada ocorrência mensal gerada fica em DespesaFixaMensal.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+// -------------------- Usuário --------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  // Estrutura preparada para 2FA — implementação futura
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean @default(false)
+  // Estrutura preparada para PIN/biometria no mobile
+  pinHash          String?
+
+  contas               Conta[]
+  cartoes              Cartao[]
+  categorias           Categoria[]
+  lancamentos          Lancamento[]
+  despesasFixas        DespesaFixa[]
+  despesasFixasMensais DespesaFixaMensal[]
+  investimentos        Investimento[]
+  cardPurchases        CardPurchase[]
+  cardInstallments     CardInstallment[]
+  cardInvoices         CardInvoice[]
+  monthlyLimits        MonthlyLimit[]
+  categoryLimits       CategoryLimit[]
+  transferencias       Transferencia[]
+  passwordResetTokens  PasswordResetToken[]
+  categoryRules        CategoryRule[]
+  importBatches        ImportBatch[]
+  investmentAssets     InvestmentAsset[]
+  financialGoals       FinancialGoal[]
+  bankConnections      BankConnection[]
+  consentRecords       ConsentRecord[]
+  syncLogs             SyncLog[]
+}
+
+// -------------------- Contas e cartões --------------------
+
+model Conta {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nome         String
+  banco        String?
+  tipo         String // corrente | poupanca | dinheiro | corretora | carteira | outra
+  saldoInicial Float    @default(0)
+  cor          String?
+  ativa        Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  lancamentos   Lancamento[]
+  despesasFixas DespesaFixa[]
+  investimentos Investimento[]
+  transferenciasOrigem  Transferencia[] @relation("transferenciaOrigem")
+  transferenciasDestino Transferencia[] @relation("transferenciaDestino")
+  importBatches ImportBatch[]
+}
+
+model Cartao {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nome          String
+  banco         String?
+  limite        Float    @default(0)
+  diaFechamento Int
+  diaVencimento Int
+  cor           String?
+  ativo         Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  lancamentos   Lancamento[]
+  despesasFixas DespesaFixa[]
+  purchases     CardPurchase[]
+  invoices      CardInvoice[]
+}
+
+// -------------------- Categorias --------------------
+
+model Categoria {
+  id     String  @id @default(cuid())
+  userId String
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nome   String
+  tipo   String // despesa | receita
+  cor    String?
+  icone  String?
+
+  lancamentos   Lancamento[]
+  despesasFixas DespesaFixa[]
+  cardPurchases CardPurchase[]
+  categoryLimits CategoryLimit[]
+  categoryRules CategoryRule[]
+  importedTransactions ImportedTransaction[]
+}
+
+// -------------------- Lançamentos comuns --------------------
+// Receitas, despesas variáveis avulsas, parcelas e assinaturas.
+
+model Lancamento {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  descricao      String
+  valor          Float
+  data           DateTime // data de competência
+  tipo           String // receita | despesa
+  status         String   @default("paga") // prevista | confirmada | paga | atrasada | cancelada
+  formaPagamento String? // conta | cartao | dinheiro | pix
+
+  categoriaId String?
+  categoria   Categoria? @relation(fields: [categoriaId], references: [id])
+
+  contaId String?
+  conta   Conta?  @relation(fields: [contaId], references: [id])
+
+  cartaoId String?
+  cartao   Cartao? @relation(fields: [cartaoId], references: [id])
+
+  parcelaAtual   Int?
+  totalParcelas  Int?
+  parcelaGrupoId String?
+
+  ehAssinatura Boolean @default(false)
+
+  observacoes String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// -------------------- Despesa fixa: template (cadastro) --------------------
+
+model DespesaFixa {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  descricao String
+
+  tipoValor String // fixo | variavel
+  valor     Float // valor fixo OU valor previsto (variável)
+
+  categoriaId String?
+  categoria   Categoria? @relation(fields: [categoriaId], references: [id])
+
+  contaId String?
+  conta   Conta?  @relation(fields: [contaId], references: [id])
+
+  cartaoId String?
+  cartao   Cartao? @relation(fields: [cartaoId], references: [id])
+
+  diaVencimento Int
+  dataInicio    DateTime
+  dataFim       DateTime?
+  ativa         Boolean   @default(true)
+
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  ocorrencias DespesaFixaMensal[]
+}
+
+// -------------------- Despesa fixa: ocorrência mensal (gerada) --------------------
+
+model DespesaFixaMensal {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  despesaFixaId String
+  despesaFixa   DespesaFixa @relation(fields: [despesaFixaId], references: [id], onDelete: Cascade)
+
+  mes Int
+  ano Int
+
+  // Overrides "só este mês" — null = herda do template
+  descricaoOverride   String?
+  categoriaIdOverride String?
+  contaIdOverride     String?
+  cartaoIdOverride    String?
+
+  valorPrevisto Float
+  valorReal     Float?
+
+  diaVencimento  Int
+  dataVencimento DateTime
+  dataPagamento  DateTime?
+
+  status String @default("prevista") // prevista | confirmada | paga | atrasada | cancelada
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([despesaFixaId, mes, ano])
+  @@index([userId, ano, mes])
+}
+
+// -------------------- Investimentos --------------------
+
+// Movimentações (aportes/resgates/rendimentos/taxas/etc.)
+model Investimento {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  descricao String
+  tipo      String // aporte | resgate | rendimento | atualizacao | taxa | imposto | vencimento
+  valor     Float
+  data      DateTime
+  ativo     String? // legado/free-text — preferir vincular a InvestmentAsset
+
+  assetId   String?
+  asset     InvestmentAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  contaId String?
+  conta   Conta?  @relation(fields: [contaId], references: [id])
+
+  observacoes String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId, data])
+  @@index([assetId])
+}
+
+// -------------------- Cartão: compras e parcelas --------------------
+// Regra prioritária #1 da especificação:
+//   No parcelamento, o valor TOTAL da compra abate o limite do cartão
+//   apenas UMA VEZ, no mês da primeira parcela. As parcelas filhas aparecem
+//   nas faturas dos meses seguintes sem alterar o limite novamente.
+
+model CardPurchase {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  cartaoId         String
+  cartao           Cartao   @relation(fields: [cartaoId], references: [id], onDelete: Cascade)
+
+  descricao        String
+  valorTotal       Float    // valor total da compra (abate o limite uma vez)
+  totalParcelas    Int      @default(1)  // 1 = à vista
+  dataCompra       DateTime
+  primeiraCompetenciaMes Int
+  primeiraCompetenciaAno Int
+
+  categoriaId      String?
+  categoria        Categoria? @relation(fields: [categoriaId], references: [id])
+
+  ehAssinatura     Boolean  @default(false)
+  status           String   @default("ativa") // ativa | cancelada
+  observacoes      String?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  installments     CardInstallment[]
+
+  @@index([userId, cartaoId])
+  @@index([userId, status])
+}
+
+model CardInstallment {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  purchaseId    String
+  purchase      CardPurchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+
+  invoiceId     String?
+  invoice       CardInvoice? @relation(fields: [invoiceId], references: [id])
+
+  numero        Int       // 1, 2, 3...
+  valor         Float
+  mes           Int
+  ano           Int
+  dataVencimento DateTime
+  dataPagamento DateTime?
+
+  status        String    @default("prevista") // prevista | paga | atrasada | cancelada
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, ano, mes])
+  @@index([purchaseId])
+}
+
+model CardInvoice {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  cartaoId        String
+  cartao          Cartao   @relation(fields: [cartaoId], references: [id], onDelete: Cascade)
+
+  mes             Int
+  ano             Int
+  dataFechamento  DateTime
+  dataVencimento  DateTime
+  total           Float    @default(0)
+  totalPago       Float    @default(0)
+  status          String   @default("aberta") // aberta | fechada | paga | atrasada
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  installments    CardInstallment[]
+
+  @@unique([cartaoId, mes, ano])
+  @@index([userId, ano, mes])
+}
+
+// -------------------- Limite mensal de gastos (item 3 da spec) --------------------
+
+model MonthlyLimit {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  mes       Int
+  ano       Int
+  valor     Float
+  // se incluiInvestimentos = true, aportes contam como "gasto" no limite
+  incluiInvestimentos Boolean @default(false)
+  incluiCartao        Boolean @default(true)
+
+  observacao String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, mes, ano])
+  @@index([userId])
+}
+
+model CategoryLimit {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  categoriaId String
+  categoria   Categoria @relation(fields: [categoriaId], references: [id], onDelete: Cascade)
+
+  mes         Int
+  ano         Int
+  valor       Float
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, categoriaId, mes, ano])
+  @@index([userId, ano, mes])
+}
+
+// -------------------- Transferências entre contas (item 11) --------------------
+// Não conta como despesa nem receita — apenas movimenta saldo entre contas.
+
+model Transferencia {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  origemContaId   String
+  origemConta     Conta    @relation("transferenciaOrigem", fields: [origemContaId], references: [id], onDelete: Cascade)
+
+  destinoContaId  String
+  destinoConta    Conta    @relation("transferenciaDestino", fields: [destinoContaId], references: [id], onDelete: Cascade)
+
+  valor           Float
+  data            DateTime
+  descricao       String?
+  observacoes     String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId, data])
+}
+
+// -------------------- Recuperação de senha --------------------
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// -------------------- Categorização automática (item 20 da spec) --------------------
+// Regras "se a descrição contém X, sugerir categoria Y". Aprendem com o uso.
+
+model CategoryRule {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  padrao      String   // texto a buscar na descrição (case-insensitive contains)
+  categoriaId String
+  categoria   Categoria @relation(fields: [categoriaId], references: [id], onDelete: Cascade)
+
+  // Prioridade: regras de aprendizado têm peso maior conforme o usuário usa.
+  peso        Int      @default(1)
+  origem      String   @default("usuario") // usuario | sistema (padrão)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, padrao])
+  @@index([userId])
+}
+
+// -------------------- Importação de extratos (item 12 da spec) --------------------
+
+model ImportBatch {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  nome         String   // ex: "Extrato Nubank - Out/2026"
+  formato      String   // csv | ofx | xlsx
+  origem       String?  // ex: nome do banco/instituição
+  contaId      String?
+  conta        Conta?   @relation(fields: [contaId], references: [id], onDelete: SetNull)
+
+  status       String   @default("rascunho") // rascunho | confirmado | cancelado
+  totalLinhas  Int      @default(0)
+  totalImportadas Int   @default(0)
+  totalDuplicadas Int   @default(0)
+
+  createdAt    DateTime @default(now())
+  confirmedAt  DateTime?
+
+  transactions ImportedTransaction[]
+
+  @@index([userId, createdAt])
+}
+
+model ImportedTransaction {
+  id          String   @id @default(cuid())
+  batchId     String
+  batch       ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  // Dados originais (preserva o que veio do arquivo)
+  dataOriginal      DateTime
+  descricaoOriginal String
+  valorOriginal     Float
+
+  // Decisão do usuário (sobrescrevíveis na prévia)
+  tipo            String   // receita | despesa
+  data            DateTime
+  descricao       String
+  valor           Float
+  categoriaId     String?
+  categoria       Categoria? @relation(fields: [categoriaId], references: [id])
+
+  status          String   @default("pendente") // pendente | importado | ignorado | duplicada
+  duplicaDeLancamentoId String?
+  selecionado     Boolean  @default(true)
+
+  createdAt       DateTime @default(now())
+
+  @@index([batchId])
+}
+
+// -------------------- Investimentos: ativos (item 15) --------------------
+
+model InvestmentAsset {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  nome          String
+  instituicao   String?
+  tipo          String  // poupanca | cdb | lci | lca | tesouro | fundo | fii | acoes | etf | cripto | previdencia | conta_remunerada | outros
+  valorAplicado Float    @default(0)
+  valorAtual    Float    @default(0)
+
+  dataAplicacao DateTime?
+  vencimento    DateTime?
+  liquidez      String?  // diaria | mensal | trimestral | anual | sem_liquidez
+  risco         String?  // baixo | medio | alto
+  objetivo      String?
+
+  status        String   @default("ativo") // ativo | resgatado | vencido
+  observacoes   String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  movimentacoes Investimento[]
+
+  @@index([userId, status])
+  @@index([userId, tipo])
+}
+
+// -------------------- Metas financeiras (item 17) --------------------
+
+model FinancialGoal {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  nome        String
+  valorAlvo   Float
+  valorAtual  Float    @default(0)
+  prazo       DateTime?
+  categoria   String? // emergencia | viagem | imovel | veiculo | educacao | aposentadoria | outros
+  observacao  String?
+  status      String   @default("em_andamento") // em_andamento | concluida | cancelada
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+// -------------------- Open Finance — scaffolding (itens 13/14) --------------------
+
+model BankConnection {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  provider      String   // pluggy | belvo | mock | etc.
+  providerItemId String? // id da conexão no provider
+  bancoNome     String
+  bancoLogo     String?
+  status        String   @default("desconectado") // conectado | desconectado | expirado | erro
+  frequenciaSync String  @default("manual") // manual | diaria | semanal | mensal
+
+  ultimaSincronizacao  DateTime?
+  proximaSincronizacao DateTime?
+
+  observacoes   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  bankAccounts        BankAccountSync[]
+  cardAccounts        CardSyncAccount[]
+  investmentPositions InvestmentPositionSync[]
+  syncLogs            SyncLog[]
+  consentRecord       ConsentRecord?
+
+  @@index([userId])
+}
+
+model ConsentRecord {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionId    String   @unique
+  connection      BankConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  permissoes      String   // CSV de permissões autorizadas (contas, extratos, cartoes, etc.)
+  dataAutorizacao DateTime @default(now())
+  dataExpiracao   DateTime?
+  revogadoEm      DateTime?
+
+  @@index([userId])
+}
+
+model BankAccountSync {
+  id            String   @id @default(cuid())
+  connectionId  String
+  connection    BankConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  providerAccountId String
+  tipo          String   // corrente | poupanca
+  numero        String?
+  agencia       String?
+  saldoAtual    Float    @default(0)
+  moeda         String   @default("BRL")
+
+  ultimaSincronizacao DateTime?
+  createdAt     DateTime @default(now())
+
+  transactions  BankTransactionSync[]
+
+  @@unique([connectionId, providerAccountId])
+}
+
+model BankTransactionSync {
+  id              String   @id @default(cuid())
+  bankAccountId   String
+  bankAccount     BankAccountSync @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+
+  providerTxId    String
+  data            DateTime
+  descricao       String
+  valor           Float
+  tipo            String   // credito | debito
+  categoriaSugerida String?
+  lancamentoId    String?  // se já foi importado para Lancamento
+
+  createdAt       DateTime @default(now())
+
+  @@unique([bankAccountId, providerTxId])
+  @@index([data])
+}
+
+model CardSyncAccount {
+  id            String   @id @default(cuid())
+  connectionId  String
+  connection    BankConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  providerCardId String
+  nome          String
+  bandeira      String?
+  limite        Float    @default(0)
+  limiteUsado   Float    @default(0)
+
+  ultimaSincronizacao DateTime?
+  createdAt     DateTime @default(now())
+
+  transactions  CardSyncTransaction[]
+
+  @@unique([connectionId, providerCardId])
+}
+
+model CardSyncTransaction {
+  id              String   @id @default(cuid())
+  cardAccountId   String
+  cardAccount     CardSyncAccount @relation(fields: [cardAccountId], references: [id], onDelete: Cascade)
+
+  providerTxId    String
+  data            DateTime
+  descricao       String
+  valor           Float
+  parcelaNum      Int?
+  parcelaTotal    Int?
+  cardPurchaseId  String?
+  createdAt       DateTime @default(now())
+
+  @@unique([cardAccountId, providerTxId])
+}
+
+model InvestmentPositionSync {
+  id              String   @id @default(cuid())
+  connectionId    String
+  connection      BankConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  providerAssetId String
+  nome            String
+  tipo            String
+  valorAplicado   Float
+  valorAtual      Float
+  vencimento      DateTime?
+  ultimaAtualizacao DateTime?
+  assetId         String? // pode mapear para InvestmentAsset
+
+  createdAt       DateTime @default(now())
+
+  @@unique([connectionId, providerAssetId])
+}
+
+model SyncLog {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionId  String?
+  connection    BankConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  tipo          String   // contas | extrato | cartoes | investimentos | tudo
+  status        String   // sucesso | erro | parcial
+  iniciadoEm    DateTime @default(now())
+  finalizadoEm  DateTime?
+  totalImportado Int     @default(0)
+  totalDuplicado Int     @default(0)
+  totalErros    Int      @default(0)
+  mensagem      String?
+
+  @@index([userId, iniciadoEm])
+}
