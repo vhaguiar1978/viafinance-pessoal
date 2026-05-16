@@ -1,8 +1,9 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
-import { prisma } from "./prisma";
 import { z } from "zod";
+import { prisma } from "./prisma";
+import authConfig from "@/auth.config";
 
 const credentialsSchema = z.object({
   email: z.string().email(),
@@ -10,10 +11,7 @@ const credentialsSchema = z.object({
 });
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  session: { strategy: "jwt" },
-  // Confia no header X-Forwarded-Host — necessário pra tunnels, proxies, Vercel etc.
-  trustHost: true,
-  pages: { signIn: "/login" },
+  ...authConfig,
   providers: [
     Credentials({
       credentials: {
@@ -36,35 +34,4 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
     }),
   ],
-  callbacks: {
-    async jwt({ token, user }) {
-      if (user) token.id = user.id;
-      return token;
-    },
-    async session({ session, token }) {
-      if (token?.id && session.user) {
-        session.user.id = token.id as string;
-      }
-      return session;
-    },
-    /**
-     * Sempre retorna URLs RELATIVAS pra forçar Auth.js a usar o host atual
-     * da requisição (resolve problema de redirect pra localhost quando atrás
-     * de tunnels/proxies como serveo/cloudflared/Vercel).
-     */
-    async redirect({ url, baseUrl }) {
-      // URL já é relativa → ok
-      if (url.startsWith("/")) return url;
-      // URL absoluta do mesmo host → extrai caminho
-      try {
-        const u = new URL(url);
-        const b = new URL(baseUrl);
-        if (u.origin === b.origin) return u.pathname + u.search;
-      } catch {
-        /* ignora */
-      }
-      // Fallback: dashboard relativo
-      return "/dashboard";
-    },
-  },
 });
