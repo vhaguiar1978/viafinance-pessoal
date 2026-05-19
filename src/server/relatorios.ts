@@ -22,6 +22,25 @@ export interface Relatorio {
   colunas: string[];
   linhas: LinhaRelatorio[];
   totais?: Record<string, number>;
+  /** Total agregado destacado (geralmente a soma da coluna "Valor"). */
+  totalGeral?: number;
+  /** Subtítulo opcional descrevendo filtros aplicados. */
+  subtitulo?: string;
+}
+
+export interface FiltroAvancado {
+  /** Período personalizado: quando fornecido, sobrepõe mes/ano. */
+  inicio?: Date;
+  fim?: Date;
+  /** Filtrar por uma ou mais categorias (IDs). */
+  categoriaIds?: string[];
+  /** Busca case-insensitive na descrição. */
+  busca?: string;
+}
+
+function aplicaFiltroTexto(s: string, q?: string): boolean {
+  if (!q) return true;
+  return s.toLowerCase().includes(q.toLowerCase());
 }
 
 export async function gerarRelatorio(
@@ -29,8 +48,18 @@ export async function gerarRelatorio(
   tipo: TipoRelatorio,
   mes: number,
   ano: number,
+  filtro?: FiltroAvancado,
 ): Promise<Relatorio> {
   const comp = obterCompetencia(mes, ano);
+  // Período efetivo: personalizado se fornecido, senão o do mês/ano.
+  const inicio = filtro?.inicio ?? comp.inicio;
+  const fim = filtro?.fim ?? comp.fim;
+  const categoriaIds = filtro?.categoriaIds && filtro.categoriaIds.length > 0
+    ? filtro.categoriaIds : undefined;
+  const usaPeriodoCustom = !!(filtro?.inicio || filtro?.fim);
+  const rotuloPeriodo = usaPeriodoCustom
+    ? `${inicio.toLocaleDateString("pt-BR")} – ${fim.toLocaleDateString("pt-BR")}`
+    : `${comp.nome}/${ano}`;
 
   switch (tipo) {
     case "demonstrativo": {
@@ -56,20 +85,46 @@ export async function gerarRelatorio(
       const lancs = await prisma.lancamento.findMany({
         where: {
           userId,
-          data: { gte: comp.inicio, lte: comp.fim },
+          data: { gte: inicio, lte: fim },
           tipo: "despesa",
           status: { not: "cancelada" },
+          ...(categoriaIds ? { categoriaId: { in: categoriaIds } } : {}),
+          ...(filtro?.busca
+            ? { descricao: { contains: filtro.busca, mode: "insensitive" } }
+            : {}),
         },
         include: { categoria: true },
       });
-      const installs = await prisma.cardInstallment.findMany({
-        where: { userId, mes, ano, status: { not: "cancelada" } },
-        include: { purchase: { include: { categoria: true } } },
-      });
-      const fixas = await prisma.despesaFixaMensal.findMany({
-        where: { userId, mes, ano, status: { not: "cancelada" } },
-        include: { despesaFixa: { include: { categoria: true } } },
-      });
+      // Quando há período custom, parcelas/fixas mensais ficam fora — só
+      // lançamentos têm data exata. Se for o mês/ano padrão, agrega como antes.
+      const installs = usaPeriodoCustom
+        ? []
+        : await prisma.cardInstallment.findMany({
+            where: {
+              userId,
+              mes,
+              ano,
+              status: { not: "cancelada" },
+              ...(categoriaIds
+                ? { purchase: { categoriaId: { in: categoriaIds } } }
+                : {}),
+            },
+            include: { purchase: { include: { categoria: true } } },
+          });
+      const fixas = usaPeriodoCustom
+        ? []
+        : await prisma.despesaFixaMensal.findMany({
+            where: {
+              userId,
+              mes,
+              ano,
+              status: { not: "cancelada" },
+              ...(categoriaIds
+                ? { despesaFixa: { categoriaId: { in: categoriaIds } } }
+                : {}),
+            },
+            include: { despesaFixa: { include: { categoria: true } } },
+          });
       const map = new Map<string, { qtd: number; valor: number }>();
       const add = (nome: string, v: number) => {
         const cur = map.get(nome) ?? { qtd: 0, valor: 0 };
@@ -95,10 +150,12 @@ export async function gerarRelatorio(
           "%": total > 0 ? ((v.valor / total) * 100).toFixed(1) + "%" : "0%",
         }));
       return {
-        titulo: `Gastos por categoria — ${comp.nome}/${ano}`,
+        titulo: `Gastos por categoria — ${rotuloPeriodo}`,
+        subtitulo: filtro?.busca ? `Filtro: "${filtro.busca}"` : undefined,
         colunas: ["Categoria", "Itens", "Valor", "%"],
         linhas,
         totais: { Valor: total },
+        totalGeral: total,
       };
     }
     case "entradas-saidas": {
@@ -152,9 +209,13 @@ export async function gerarRelatorio(
       const lancs = await prisma.lancamento.findMany({
         where: {
           userId,
-          data: { gte: comp.inicio, lte: comp.fim },
+          data: { gte: inicio, lte: fim },
           tipo: "despesa",
           status: { not: "cancelada" },
+          ...(categoriaIds ? { categoriaId: { in: categoriaIds } } : {}),
+          ...(filtro?.busca
+            ? { descricao: { contains: filtro.busca, mode: "insensitive" } }
+            : {}),
         },
         include: { categoria: true, conta: true },
         orderBy: { data: "asc" },
@@ -167,11 +228,17 @@ export async function gerarRelatorio(
         Status: l.status,
         Valor: l.valor,
       }));
+      const total = linhas.reduce((a, l) => a + Number(l.Valor), 0);
+      const subtitulo: string[] = [];
+      if (filtro?.busca) subtitulo.push(`busca "${filtro.busca}"`);
+      if (categoriaIds) subtitulo.push(`${categoriaIds.length} categoria(s) filtrada(s)`);
       return {
-        titulo: `Despesas variáveis — ${comp.nome}/${ano}`,
+        titulo: `Despesas variáveis — ${rotuloPeriodo}`,
+        subtitulo: subtitulo.length > 0 ? subtitulo.join(" · ") : undefined,
         colunas: ["Data", "Descrição", "Categoria", "Conta", "Status", "Valor"],
         linhas,
-        totais: { Valor: linhas.reduce((a, l) => a + Number(l.Valor), 0) },
+        totais: { Valor: total },
+        totalGeral: total,
       };
     }
     case "cartao": {
