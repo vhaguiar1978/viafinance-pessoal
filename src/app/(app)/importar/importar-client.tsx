@@ -522,7 +522,12 @@ function BatchCard({
 
   async function setCategoriaTx(id: string, categoriaId: string | null) {
     try {
-      await atualizarTransacaoImportada({ id, categoriaId });
+      const r = await atualizarTransacaoImportada({ id, categoriaId });
+      if (r?.propagadas && r.propagadas > 0) {
+        toast.success(
+          `Categoria aplicada em +${r.propagadas} ${r.propagadas === 1 ? "transação igual" : "transações iguais"}`,
+        );
+      }
       onChange();
     } catch (err) {
       toast.error("Erro", err instanceof Error ? err.message : "Falha");

@@ -103,6 +103,7 @@ export async function atualizarTransacaoImportada(
   const data = atualizarTxSchema.parse(input);
   const own = await prisma.importedTransaction.findFirst({
     where: { id: data.id, batch: { userId: user.id } },
+    select: { id: true, batchId: true, descricao: true, tipo: true },
   });
   if (!own) throw new Error("Transação não encontrada");
 
@@ -119,7 +120,29 @@ export async function atualizarTransacaoImportada(
       ...(data.tipo ? { tipo: data.tipo } : {}),
     },
   });
+
+  // Propagação em lote: quando o usuário define a categoria de UMA transação,
+  // aplica a mesma categoria a todas as outras OUTRAS transações do MESMO
+  // batch que tenham a MESMA descrição (case-insensitive) e ainda estejam sem
+  // categoria. Isso reduz drasticamente o trabalho manual em extratos com
+  // muitas linhas iguais (Pix para o mesmo destinatário, débitos recorrentes
+  // etc.). Não sobrescreve categorias já definidas pelo usuário.
+  let propagadas = 0;
+  if (data.categoriaId !== undefined && data.categoriaId) {
+    const r = await prisma.importedTransaction.updateMany({
+      where: {
+        batchId: own.batchId,
+        id: { not: own.id },
+        categoriaId: null,
+        descricao: { equals: own.descricao, mode: "insensitive" },
+      },
+      data: { categoriaId: data.categoriaId },
+    });
+    propagadas = r.count;
+  }
+
   revalidatePath("/importar");
+  return { propagadas };
 }
 
 export async function confirmarImportBatch(batchId: string) {
