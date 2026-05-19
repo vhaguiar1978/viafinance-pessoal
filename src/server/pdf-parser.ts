@@ -99,26 +99,61 @@ function parseValorPDF(s: string): number | null {
 const REGEX_LINHA_GENERICA =
   /(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}|\d{1,2}\s+[a-zç]{3,9}\s+\d{2,4})\s+(.+?)\s+([+\-]?R?\$?\s?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}(?:\s?[CD])?)\s*$/im;
 
+// Limite máximo razoável pra descrição de uma transação. Linhas/grupos que
+// excedam isso indicam que a regex casou o texto inteiro do extrato como uma
+// única "transação" (caso típico de PDFs com layout contínuo onde todas as
+// movimentações vêm em uma linha só).
+const MAX_DESC_LEN = 180;
+
+// Detecta se uma linha tem múltiplas ocorrências de data — indício de que o
+// PDF não tem quebras entre transações (PagSeguro, alguns layouts do Inter etc.)
+const REGEX_DATA_GLOBAL =
+  /(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}|\d{1,2}\s+[a-zç]{3,9}\s+\d{2,4})/gi;
+
+// Extrai "DATA DESCRICAO VALOR" de um trecho que já está delimitado (de uma
+// data até a próxima). Não usa âncoras de fim de linha — assume que o caller
+// já picotou em chunks corretos.
+const REGEX_CHUNK =
+  /^\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}|\d{1,2}\s+[a-zç]{3,9}\s+\d{2,4})\s+(.+?)\s+([+\-]?R?\$?\s?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}(?:\s?[CD])?)\s*$/i;
+
+function descricaoEhRuim(desc: string): boolean {
+  if (desc.length < 2 || desc.length > MAX_DESC_LEN) return true;
+  if (/^(total|saldo|periodo|período|descrição|descricao)/i.test(desc)) return true;
+  return false;
+}
+
 /**
  * Extrai linhas em formato "DATA DESCRIÇÃO VALOR" do texto bruto.
- * Faz uma varredura linha por linha + tenta também identificar grupos de 3
- * elementos consecutivos.
+ *
+ * Três estratégias, em ordem:
+ *   1) Linha-por-linha — funciona quando cada transação está em sua própria
+ *      linha do texto extraído (Nubank, Itaú, Bradesco, etc.).
+ *   2) Split por datas — quando o extractor de texto colocou várias
+ *      transações na mesma linha (PagSeguro, alguns Inter). Picota o texto
+ *      pelos pontos onde há uma data e processa cada pedaço como um chunk.
+ *   3) Regex global no texto compactado — fallback final pra layouts em coluna
+ *      onde a quebra natural se perde.
+ *
+ * Linhas/chunks cuja descrição passe de MAX_DESC_LEN são descartadas, pra
+ * evitar que a regex grude todo o extrato em uma única "transação".
  */
 export function parsePDFText(text: string): ParsedPDFRow[] {
   const rows: ParsedPDFRow[] = [];
   const linhasBrutas = text.split(/\r?\n/);
 
-  // 1) Linhas com a estrutura completa "DATA  DESC  VALOR"
+  // 1) Linhas que já têm a estrutura completa "DATA  DESC  VALOR"
   for (const linha of linhasBrutas) {
     const l = linha.trim();
     if (l.length < 8) continue;
+    // Linha muito longa ou com várias datas → trata na estratégia 2
+    const datasNaLinha = (l.match(REGEX_DATA_GLOBAL) ?? []).length;
+    if (datasNaLinha > 1 || l.length > 300) continue;
     const m = l.match(REGEX_LINHA_GENERICA);
     if (!m) continue;
     const data = parseDataPDF(m[1]);
     if (!data) continue;
     const descricao = m[2].trim().replace(/\s+/g, " ");
-    if (descricao.length < 2 || /total|saldo/i.test(descricao.slice(0, 12)))
-      continue;
+    if (descricaoEhRuim(descricao)) continue;
     const valor = parseValorPDF(m[3]);
     if (valor === null || Math.abs(valor) < 0.01) continue;
     rows.push({
@@ -129,9 +164,35 @@ export function parsePDFText(text: string): ParsedPDFRow[] {
     });
   }
 
-  // 2) Se a varredura por linha falhou (PDFs com layout em colunas), tenta
-  // identificar grupos no texto contínuo: DATA seguido por descrição seguido
-  // por valor.
+  // 2) Linhas com múltiplas datas — picota por data e processa cada chunk
+  for (const linha of linhasBrutas) {
+    const l = linha.trim();
+    if (l.length < 20) continue;
+    const matches = [...l.matchAll(REGEX_DATA_GLOBAL)];
+    if (matches.length < 2) continue;
+    for (let i = 0; i < matches.length; i++) {
+      const start = matches[i].index ?? 0;
+      const end = i + 1 < matches.length ? (matches[i + 1].index ?? l.length) : l.length;
+      const chunk = l.slice(start, end).trim();
+      if (chunk.length < 8 || chunk.length > MAX_DESC_LEN + 60) continue;
+      const m = chunk.match(REGEX_CHUNK);
+      if (!m) continue;
+      const data = parseDataPDF(m[1]);
+      if (!data) continue;
+      const descricao = m[2].trim().replace(/\s+/g, " ");
+      if (descricaoEhRuim(descricao)) continue;
+      const valor = parseValorPDF(m[3]);
+      if (valor === null || Math.abs(valor) < 0.01) continue;
+      rows.push({
+        data,
+        descricao,
+        valor: Math.abs(valor),
+        tipo: valor < 0 ? "despesa" : "receita",
+      });
+    }
+  }
+
+  // 3) Fallback final: regex global no texto compactado (layouts em coluna)
   if (rows.length === 0) {
     const compacto = text.replace(/\n+/g, " ").replace(/\s+/g, " ");
     const regexGrupo =
@@ -141,7 +202,7 @@ export function parsePDFText(text: string): ParsedPDFRow[] {
       const data = parseDataPDF(match[1]);
       if (!data) continue;
       const descricao = match[2].trim().replace(/\s+/g, " ");
-      if (descricao.length < 2) continue;
+      if (descricaoEhRuim(descricao)) continue;
       const valor = parseValorPDF(match[3]);
       if (valor === null || Math.abs(valor) < 0.01) continue;
       rows.push({
