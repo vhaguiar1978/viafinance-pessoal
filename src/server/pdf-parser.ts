@@ -214,7 +214,43 @@ export function parsePDFText(text: string): ParsedPDFRow[] {
     }
   }
 
-  return rows;
+  return dedupeDefensivo(rows);
+}
+
+/**
+ * Defesa contra duplicação do extractor de PDF (unpdf/pdf-parse podem
+ * "duplicar" partes do texto quando o PDF tem layouts complexos, páginas
+ * repetidas, ou tabelas renderizadas como sobreposição).
+ *
+ * Heurística: se a mesma chave (data + descrição + valor + tipo) aparece
+ * mais de 2 vezes no resultado bruto, é quase certo que foi duplicação do
+ * extractor — manter só 1. Se aparece exatamente 2 vezes, mantém as 2
+ * (pode ser uma operação real repetida pelo usuário no mesmo dia).
+ *
+ * A janela é defensiva pra cima — se o usuário REALMENTE fez 5 Pix iguais
+ * no mesmo dia, vai aparecer só 1 e ele pode adicionar os 4 restantes
+ * manualmente. Esse caso é raríssimo; o caso comum é o extractor cuspir 31
+ * cópias da mesma transação.
+ */
+function dedupeDefensivo(rows: ParsedPDFRow[]): ParsedPDFRow[] {
+  if (rows.length <= 1) return rows;
+  const LIMITE_COPIAS_REAIS = 2;
+  const chave = (r: ParsedPDFRow) =>
+    `${r.data.getFullYear()}-${r.data.getMonth() + 1}-${r.data.getDate()}|${r.descricao}|${r.valor.toFixed(2)}|${r.tipo}`;
+  const counts = new Map<string, number>();
+  for (const r of rows) counts.set(chave(r), (counts.get(chave(r)) ?? 0) + 1);
+  const vistos = new Map<string, number>();
+  const limpas: ParsedPDFRow[] = [];
+  for (const r of rows) {
+    const k = chave(r);
+    const total = counts.get(k)!;
+    const max = total > LIMITE_COPIAS_REAIS ? 1 : total;
+    const ja = vistos.get(k) ?? 0;
+    if (ja >= max) continue;
+    vistos.set(k, ja + 1);
+    limpas.push(r);
+  }
+  return limpas;
 }
 
 /**
