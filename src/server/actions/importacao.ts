@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { parseCSV } from "../csv-parser";
-import { sugerirCategoria } from "../categorization";
+import { aprenderCategoria, sugerirCategoria } from "../categorization";
 
 const criarBatchSchema = z.object({
   nome: z.string().min(1),
@@ -139,6 +139,10 @@ export async function atualizarTransacaoImportada(
       data: { categoriaId: data.categoriaId },
     });
     propagadas = r.count;
+
+    // Aprende a regra pra futuros imports: o sistema vai categorizar
+    // automaticamente transações com descrição parecida nos próximos PDFs.
+    await aprenderCategoria(user.id, own.descricao, data.categoriaId);
   }
 
   revalidatePath("/importar");

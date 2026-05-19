@@ -174,9 +174,60 @@ export async function sugerirCategoria(
 }
 
 /**
- * Aprende: quando o usuário escolheu uma categoria para uma descrição, criamos
- * (ou reforçamos) uma regra. Usamos como "padrão" a primeira palavra
- * significativa da descrição (pra não armazenar a descrição inteira).
+ * Prefixos genéricos de operação bancária que não devem entrar na regra
+ * — eles aparecem em quase toda transação e não identificam o destinatário.
+ */
+const PREFIXOS_OPERACAO: RegExp[] = [
+  /^(qr code\s+)?pix\s+(enviado|recebido|transf(er[êe]ncia)?)\s*[-–]?\s*/i,
+  /^pix\s+transf\.?\s*/i,
+  /^ted\s*[-–]?\s*/i,
+  /^doc\s*[-–]?\s*/i,
+  /^cart[ãa]o\s+(de\s+)?(d[ée]bito|cr[ée]dito)\s*[-–]?\s*/i,
+  /^compra\s+(com\s+)?cart[ãa]o\s*[-–]?\s*/i,
+  /^dep(\.|osito)?\s+(din(heiro)?\s+)?atm\s*[-–]?\s*/i,
+  /^transf(er[êe]ncia)?\.?\s*(autoriz(ada)?\.?)?\s*(entre\s+c\/c)?\s*[-–]?\s*/i,
+  /^saque\s*[-–]?\s*/i,
+  /^compra\s*[-–]?\s*/i,
+  /^pagamento\s+(de\s+)?(boleto|conta)?\s*[-–]?\s*/i,
+];
+
+/**
+ * Extrai o padrão mais distintivo de uma descrição pra servir de regra de
+ * categorização. Estratégia:
+ *   1. Remove prefixos comuns de operação ("QR Code Pix enviado - ...", etc.)
+ *   2. Remove datas/números no final
+ *   3. Pega o segmento mais longo entre traços (geralmente o nome do
+ *      destinatário/estabelecimento)
+ *   4. Limita a 60 chars
+ */
+function extrairPadrao(descricao: string): string | null {
+  let s = descricao.trim();
+  // 1) Remove prefixos de operação
+  for (const r of PREFIXOS_OPERACAO) s = s.replace(r, "");
+  // 2) Remove datas no fim (DD/MM, DD/MM/YYYY, etc.)
+  s = s.replace(/\s+\d{1,2}[/\-]\d{1,2}([/\-]\d{2,4})?\s*$/, "");
+  // 3) Remove pontuação solta no começo
+  s = s.replace(/^[\s\-–:|]+/, "").trim();
+  if (s.length < 3) return null;
+  // 4) Quebra por traços e fica com o segmento mais longo
+  const partes = s.split(/\s*[-–]\s+/).map((p) => p.trim()).filter((p) => p.length >= 3);
+  let melhor = s;
+  if (partes.length > 0) {
+    melhor = partes.reduce((a, b) => (b.length > a.length ? b : a), partes[0]);
+  }
+  // 5) Limita tamanho razoável (rule.padrao tem que caber em índices)
+  melhor = melhor.slice(0, 60).trim();
+  if (melhor.length < 3) return null;
+  return melhor;
+}
+
+/**
+ * Aprende: quando o usuário escolheu uma categoria para uma descrição, cria
+ * (ou reforça) uma CategoryRule que vai categorizar transações futuras com
+ * descrição parecida — incluindo importações.
+ *
+ * O padrão salvo é o trecho mais distintivo da descrição (geralmente o nome
+ * do destinatário/estabelecimento). Reforço aumenta o peso da regra.
  */
 export async function aprenderCategoria(
   userId: string,
@@ -184,12 +235,10 @@ export async function aprenderCategoria(
   categoriaId: string,
 ): Promise<void> {
   if (!descricao || !categoriaId) return;
-  const palavras = normalizar(descricao)
-    .split(" ")
-    .filter((w) => w.length >= 3 && !/^\d+$/.test(w))
-    .slice(0, 2);
-  if (palavras.length === 0) return;
-  const padrao = palavras.join(" ");
+  const padraoBruto = extrairPadrao(descricao);
+  if (!padraoBruto) return;
+  const padrao = normalizar(padraoBruto);
+  if (padrao.length < 3) return;
 
   try {
     await prisma.categoryRule.upsert({
